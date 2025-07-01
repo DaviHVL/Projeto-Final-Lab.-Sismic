@@ -2,6 +2,7 @@
 #include <msp430f5529.h>
 #include <msp430.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include "intrinsics.h"
 
 // Definição dos pinos do LED RGB
@@ -27,7 +28,9 @@
 #define LCD_D6      0x40    // Bit de dados 6
 #define LCD_D7      0x80    // Bit de dados 7
 
-// Protótipos das funções
+#define UART_BUFFER_SIZE 20 // Tamanho máximo do Buffer
+
+// Protótipos das funções I2C
 void initI2C_Master(void);
 uint8_t i2cSend(uint8_t slaveAddr, uint8_t data);
 uint8_t lcdWriteNibble (uint8_t nibble, uint8_t isChar);
@@ -35,12 +38,21 @@ uint8_t lcdWriteByte (uint8_t byte, uint8_t isChar);
 void lcdInit(void);
 void lcdWrite(char* str);
 
+// Protótipos das funções UART
+void UART_init(void);
+void UART_sendChar(char c);
+void UART_receive();
+
+uint8_t uart_buffer[UART_BUFFER_SIZE]; // Buffer para informações recebidas
+uint8_t uart_index = 0; // Index do Buffer
+char last_caracter = ' '; // Utilizado para identificar o fim da comunicação UART
+
 uint8_t backlight_flag = LCD_BL; // Variável global para a luz de fundo
 
 uint8_t operating_mode = 1; // 1: Estudo e 0: Descanso
 
-uint8_t active_time = 1; // Tempo de Estudo Total em Minutos
-uint8_t rest_time = 1;   // Tempo de Descanso Total em Minutos
+volatile uint8_t active_time = 0; // Tempo de Estudo Total em Minutos
+volatile uint8_t rest_time = 0;   // Tempo de Descanso Total em Minutos
 
 volatile uint16_t counting_active_time = 0; // Tempo de Estudo Passado em Segundos
 volatile uint16_t counting_rest_time = 0;   // Tempo de Descanso Passado em Segundos
@@ -65,7 +77,6 @@ void main(void){
   // Configuração do TimerA0
   TA0CTL = 	TASSEL__ACLK | MC__UP;
 	TA0CCR0 = 32768 - 1;				// Conta 1 segundo
-  TA0CCTL0 = CCIE;
 
   // Configura os pinos GPIO para I2C
   // UCB0: P3.0 = SDA, P3.1 = SCL
@@ -83,11 +94,16 @@ void main(void){
   // Limpeza do LCD
   lcdClear();
 
+  // Inicializa o módulo UART
+  UART_init(); 
+
   // Habilitação Global das Interrupções
   __enable_interrupt(); 
 
   // Loop Principal
   for(;;){
+    UART_receive();
+    TA0CCTL0 |= CCIE;
     lcdClear();
     lcdWrite("Estudo");
     P1OUT |= LEDRGB_GREEN;
@@ -102,7 +118,9 @@ void main(void){
     counting_rest_time = 0;
     operating_mode = 1;
     P2OUT &= ~(LEDRGB_RED);
-
+    lcdClear();
+    TA0CCTL0 &= ~(CCIE);
+    last_caracter = ' ';
   }
 }
 
@@ -228,6 +246,65 @@ void lcdClear(void) {
   lcdWriteByte(0x01, 0);     
   __delay_cycles(20000);         
 }
+
+void UART_init(void){
+  // P3.3 para TX e P3.4 para RX
+  P3SEL |= BIT3 | BIT4;
+  P3DIR |= BIT3;  // TX como saída
+
+  UCA0CTL1 |= UCSWRST;           // Coloca UART em reset
+  UCA0CTL1 |= UCSSEL_1;          // Usa ACLK = 32.768 kHz
+
+  // Baud rate = 9600 bps
+  // Divisor = 32768 / 9600 ≈ 3.41
+  UCA0BR0 = 3;                   // Parte inteira do divisor
+  UCA0BR1 = 0;
+  UCA0MCTL = UCBRS_3;            // Correção de modulação (3 é próximo de 0.41)
+
+  UCA0CTL1 &= ~UCSWRST;          // Tira do reset, inicia UART
+}
+
+void UART_sendChar(char c){
+  while (!(UCA0IFG & UCTXIFG)); // Esperar buffer ficar pronto
+  UCA0TXBUF = c;                // Enviar char
+}
+
+void UART_receive(void) {
+  while (last_caracter != '\n'){
+    // Espera até receber um caractere via UART
+    while (!(UCA0IFG & UCRXIFG));
+
+    char received_char = UCA0RXBUF;
+
+    if (received_char != '\0' && received_char != ' ' && received_char != '\n'){
+      char c = received_char;
+      uint8_t valor = c - '0'; 
+      uart_buffer[uart_index] = valor;
+      uart_index += 1;
+    } else {
+      uint8_t final_value = 0;
+      if (uart_index == 1){
+        final_value = uart_buffer[0];
+      }
+      if (uart_index == 2){
+        final_value = uart_buffer[0]*10 + uart_buffer[1];
+      }
+      if (uart_index == 3){
+        final_value = uart_buffer[2]*100 + uart_buffer[1]*10 + uart_buffer[0];
+      }
+      uart_index = 0;
+
+      if (received_char == ' '){
+        active_time = final_value;
+      } else{
+        rest_time = final_value;
+        last_caracter = '\n';
+      }
+    }
+
+  }
+}
+
 
 // Interrupção realizada a cada 1 segundo
 # pragma vector = TIMER0_A0_VECTOR
