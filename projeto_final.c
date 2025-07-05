@@ -45,6 +45,9 @@ uint8_t rest_time = 1;   // Tempo de Descanso Total em Minutos
 volatile uint16_t counting_active_time = 0; // Tempo de Estudo Passado em Segundos
 volatile uint16_t counting_rest_time = 0;   // Tempo de Descanso Passado em Segundos
 
+volatile uint8_t start_timer_flag = 0; // Determina se o timer deve iniciar a contagem
+volatile uint8_t pause_timer_flag = 0; // Determina se o timer deve pausar a contagem
+
 void main(void){
   WDTCTL = WDTPW | WDTHOLD;  // Travar watchdog 
 
@@ -61,6 +64,14 @@ void main(void){
   P2OUT &= ~(LEDRGB_RED);
   P1OUT &= ~(LEDRGB_GREEN);
   P1OUT &= ~(LEDRGB_BLUE);
+
+  // Configuração do botão que inicia/"despausa" a contagem usando o pino GPIO P1.3
+  P1DIR &= ~BIT3;             // Pino como entrada
+  P1REN |= BIT3;              // Habilitar resistor de pull-up
+  P1OUT |= BIT3;
+  P1IE |= BIT3;               // Habilitar a interrupção do pino P1.3
+  P1IES |= BIT3;              // Interrupção na borda de descida
+  P1IFG &= ~BIT3;             // Limpa a flag
 
   // Configuração do TimerA0
   TA0CTL = 	TASSEL__ACLK | MC__UP;
@@ -88,6 +99,7 @@ void main(void){
 
   // Loop Principal
   for(;;){
+    while (!start_timer_flag); // Enquanto não pressionar o botão de iniciar, não começar contagem
     lcdClear();
     lcdWrite("Estudo");
     P1OUT |= LEDRGB_GREEN;
@@ -102,7 +114,6 @@ void main(void){
     counting_rest_time = 0;
     operating_mode = 1;
     P2OUT &= ~(LEDRGB_RED);
-
   }
 }
 
@@ -236,5 +247,13 @@ __interrupt void TA0CCR0_ISR(){
     counting_active_time += 1;
   } else{
     counting_rest_time += 1;
+  }
+}
+
+#pragma vector = PORT1_VECTOR
+__interrupt void PORT1 (){
+  if (P1IFG & BIT3){
+    start_timer_flag = 1;
+    P1IFG &= ~BIT3;
   }
 }
