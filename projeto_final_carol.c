@@ -143,6 +143,7 @@ void main(void){
 
   lcdWrite("Escolha o modo"); // Indica ao usuário para escolher o modo de operação
 
+
   // Loop Principal
   for(;;){
     while (!start_timer_flag){
@@ -195,6 +196,7 @@ void main(void){
             counting_active_time = 0;
             counted_active_time_min = 0;
             counted_active_time_sec = 0;
+            houve_reset = 1;
             break;
           }
           // Depois da pausa (sem reiniciar), voltar a contar
@@ -263,16 +265,30 @@ void main(void){
         P2OUT &= ~(LEDRGB_RED);
       }
     }
-    start_timer_flag = 0;
+    // start_timer_flag = 0;
     pause_timer_flag = 0;
     operation_mode_flag = 0;
-    if (reset_timer_flag){
+    // Apenas muda o modo automaticamente se o usuário não pediu reset
+    if (!reset_timer_flag){
+      if (operating_mode){
+        operating_mode = 0;
+      }
+      else {
+        operating_mode = 1;
+      }
+    }
+    else{
+      reset_timer_flag = 0;
+    }
+
+    /*if (reset_timer_flag){
       reset_timer_flag = 0;
     }
     else{
       lcdClear();
       lcdWrite("Escolha o modo");
     }
+    */
   }
 }
 
@@ -290,16 +306,16 @@ uint8_t i2cSend(uint8_t slaveAddr, uint8_t data) {
     UCB0IFG &= ~(UCTXIFG);
     UCB0I2CSA = slaveAddr;
     UCB0CTL1 |= UCTR|UCTXSTT; // Mestre como transmissor e mandando START
-    while((UCB0IFG & UCTXIFG) == 0); // Enquanto o buffer está cheio
+    while(!(UCB0IFG & UCTXIFG)); // Enquanto o buffer está cheio
     UCB0TXBUF = data;
-    while((UCB0CTL1 & UCTXSTT) == 1);
+    while((UCB0CTL1 & UCTXSTT));
     int answer;
-    if((UCB0IFG & UCNACKIFG) == 0){
-      while((UCB0IFG & UCTXIFG) == 0);
+    if(!(UCB0IFG & UCNACKIFG)){
+      while(!(UCB0IFG & UCTXIFG));
     }
     answer = UCB0IFG & UCNACKIFG;
     UCB0CTL1 |= UCTXSTP;
-    while ((UCB0CTL1 & UCTXSTP) == 1);
+    while ((UCB0CTL1 & UCTXSTP));
     return answer;  
 }
 
@@ -498,6 +514,7 @@ __interrupt void PORT2 (){
     __delay_cycles(10000);
     if (!(P2IN & BIT0)){
       reset_timer_flag = 1;
+      start_timer_flag = 0;
     }
     P2IFG &= ~BIT0;
   }

@@ -110,6 +110,7 @@ void main(void){
             counting_active_time = 0;
             counted_active_time_min = 0;
             counted_active_time_sec = 0;
+            houve_reset = 1;
             break;
           }
           // Depois da pausa (sem reiniciar), voltar a contar
@@ -178,16 +179,30 @@ void main(void){
         P2OUT &= ~(LEDRGB_RED);
       }
     }
-    start_timer_flag = 0;
+    // start_timer_flag = 0;
     pause_timer_flag = 0;
     operation_mode_flag = 0;
-    if (reset_timer_flag){
+    // Apenas muda o modo automaticamente se o usuário não pediu reset
+    if (!reset_timer_flag){
+      if (operating_mode){
+        operating_mode = 0;
+      }
+      else {
+        operating_mode = 1;
+      }
+    }
+    else{
+      reset_timer_flag = 0;
+    }
+
+    /*if (reset_timer_flag){
       reset_timer_flag = 0;
     }
     else{
       lcdClear();
       lcdWrite("Escolha o modo");
     }
+    */
   }
 }
 
@@ -279,6 +294,7 @@ __interrupt void PORT2 (){
     __delay_cycles(10000);
     if (!(P2IN & BIT0)){
       reset_timer_flag = 1;
+      start_timer_flag = 0;
     }
     P2IFG &= ~BIT0;
   }
