@@ -1,14 +1,18 @@
 // Bibliotecas importadas
 #include <msp430f5529.h>
 #include <msp430.h>
+#include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include "intrinsics.h"
 
 // Definição dos pinos do LED RGB
 #define LEDRGB_RED BIT4
 #define LEDRGB_GREEN BIT4
 #define LEDRGB_BLUE BIT2
+
+// Definição do Buzzer
+#define BUZZER BIT6
+
 
 // Endereço I2C do módulo LCD
 #define LCD_I2C_ADDR 0x27 // talvez o seu seja 0x3F
@@ -30,7 +34,7 @@
 
 #define UART_BUFFER_SIZE 20 // Tamanho máximo do Buffer
 
-// Protótipos das funções I2C
+// Protótipos das funções
 void initI2C_Master(void);
 uint8_t i2cSend(uint8_t slaveAddr, uint8_t data);
 uint8_t lcdWriteNibble (uint8_t nibble, uint8_t isChar);
@@ -51,11 +55,23 @@ uint8_t backlight_flag = LCD_BL; // Variável global para a luz de fundo
 
 uint8_t operating_mode = 1; // 1: Estudo e 0: Descanso
 
-volatile uint8_t active_time = 0; // Tempo de Estudo Total em Minutos
-volatile uint8_t rest_time = 0;   // Tempo de Descanso Total em Minutos
+uint8_t active_time = 2; // Tempo de Estudo Total em Minutos
+uint8_t rest_time = 2;   // Tempo de Descanso Total em Minutos
+
 
 volatile uint16_t counting_active_time = 0; // Tempo de Estudo Passado em Segundos
 volatile uint16_t counting_rest_time = 0;   // Tempo de Descanso Passado em Segundos
+volatile uint16_t counted_active_time_min = 0; // Tempo de Estudo contado em Minutos
+volatile uint16_t counted_active_time_sec = 0; // Tempo de Estudo contado em Segundos
+volatile uint16_t counted_rest_time_min = 0; // Tempo de Descanso contado em Minutos
+volatile uint16_t counted_rest_time_sec = 0; // Tempo de Estudo contado em Segundos
+
+volatile uint8_t start_timer_flag = 0; // Determina se o timer deve iniciar a contagem
+volatile uint8_t pause_timer_flag = 0; // Determina se o timer deve pausar a contagem
+volatile uint8_t reset_timer_flag = 0; // Determina se o timer deve resetar a contagem
+volatile uint8_t operation_mode_flag = 0; // Diz se o usuário apertou o botão para selecionar modo
+volatile uint8_t houve_reset = 0; // Variável que mantém o "Reiniciar" no LCD caso reset desejado
+volatile uint8_t minute_changed = 0; // Variável que indica quando houve mudança no minuto
 
 void main(void){
   WDTCTL = WDTPW | WDTHOLD;  // Travar watchdog 
@@ -74,9 +90,45 @@ void main(void){
   P1OUT &= ~(LEDRGB_GREEN);
   P1OUT &= ~(LEDRGB_BLUE);
 
+  // Configuração do buzzer
+  P1DIR |= BUZZER;
+  P1SEL &= ~(BUZZER);
+  P1OUT &= ~(BUZZER);
+
+  // Configuração dos botões de início/"despause" (P1.3) e de "pause" (P1.5)
+  P1SEL &= ~(BIT3 | BIT5);             // Pino como GPIO
+  P1DIR &= ~(BIT3 | BIT5);             // Pino como entrada
+  P1REN |= (BIT3 | BIT5);              // Habilitar resistor de pull-up
+  P1OUT |= (BIT3 | BIT5);
+  P1IFG &= ~(BIT3 | BIT5);             // Limpa a flag
+  P1IE |= (BIT3 | BIT5);               // Habilitar a interrupção dos pinos P1.3 e P1.5
+  P1IES |= (BIT3 | BIT5);              // Interrupção na borda de descida
+
+  // Configuração do botão de reset (P2.0)
+  P2SEL &= ~BIT0;                      // Pino como GPIO
+  P2DIR &= ~BIT0;                      // Pino como entrada
+  P2REN |= BIT0;                       // Habilitar resistor de pull-up
+  P2OUT |= BIT0;
+  P2IFG &= ~BIT0;                      // Limpa a flag
+  P2IE |= BIT0;                        // Habilitar interrupção do pino P2.0
+  P2IES |= BIT0;                       // Interrupção na borda de descida
+
+
+  // Configuração do botão para mudar o modo de operação (estudo/descanso) (P2.6)
+  P2SEL &= ~BIT6;                      // Pino como GPIO
+  P2DIR &= ~BIT6;                      // Pino como entrada
+  P2REN |= BIT6;                       // Habilitar resistor de pull-up
+  P2OUT |= BIT6;
+  P2IFG &= ~BIT6;                      // Limpa a flag
+  P2IE |= BIT6;                        // Habilitar interrupção do pino P2.6
+  P2IES |= BIT6;                       // Interrupção na borda de descida
+                       
+
+
   // Configuração do TimerA0
   TA0CTL = 	TASSEL__ACLK | MC__UP;
 	TA0CCR0 = 32768 - 1;				// Conta 1 segundo
+  TA0CCTL0 = CCIE;
 
   // Configura os pinos GPIO para I2C
   // UCB0: P3.0 = SDA, P3.1 = SCL
@@ -100,27 +152,161 @@ void main(void){
   // Habilitação Global das Interrupções
   __enable_interrupt(); 
 
+  lcdWrite("Defina os Tempos");
+  UART_receive();
+  lcdClear();
+
+  // Criação de uma string para guardar o tempo contado
+  char buffer[17];
+
+  lcdWrite("Escolha o modo"); // Indica ao usuário para escolher o modo de operação
+
+
   // Loop Principal
   for(;;){
-    UART_receive();
-    TA0CCTL0 |= CCIE;
-    lcdClear();
-    lcdWrite("Estudo");
-    P1OUT |= LEDRGB_GREEN;
-    while((active_time*60) != counting_active_time);
-    lcdClear();
-    lcdWrite("Descanso");
-    counting_active_time = 0;
-    operating_mode = 0;
-    P1OUT &= ~(LEDRGB_GREEN);
-    P2OUT |= LEDRGB_RED;
-    while((rest_time*60) != counting_rest_time);
-    counting_rest_time = 0;
-    operating_mode = 1;
-    P2OUT &= ~(LEDRGB_RED);
-    lcdClear();
-    TA0CCTL0 &= ~(CCIE);
-    last_caracter = ' ';
+    while (!start_timer_flag){
+      if (operation_mode_flag){
+        __delay_cycles(10000);
+        operating_mode = !operating_mode;
+        if (!houve_reset){
+          lcdClear();
+        }
+        else {
+          lcdClear();
+          lcdWrite_sec("Reiniciar");
+        }
+        if (operating_mode){
+          lcdWrite("Estudo");
+        }
+        else{
+          lcdWrite("Descanso");
+        }
+        operation_mode_flag = 0;
+      }
+      __delay_cycles(100000);
+    }
+      
+    houve_reset = 0;
+    lcdClear_sec();
+
+    // Se o usuário escolheu o modo estudo
+    if (operating_mode == 1){
+      lcdClear();
+      lcdWrite("Estudo");
+      P1OUT |= LEDRGB_GREEN;
+      while((active_time*60) != counting_active_time){
+        if (minute_changed){
+          lcdClear_sec();
+          minute_changed = 0;
+        }
+        sprintf(buffer, "%dm%ds", counted_active_time_min, counted_active_time_sec);
+        lcdWrite_sec(buffer);
+        if (pause_timer_flag) {
+          lcdClear_sec();
+          sprintf(buffer, "PAUSADO %dm%ds", counted_active_time_min, counted_active_time_sec);
+          lcdWrite_sec(buffer); // Escreve "PAUSADO - tempo passado(XmYs)" na segunda linha do LCD
+          // Se está pausado e o usuário não apertou para reiniciar
+          while (pause_timer_flag && !reset_timer_flag);
+          // Se o usuário apertou para reiniciar
+          if (reset_timer_flag) {
+            lcdClear_sec();
+            lcdWrite_sec("Reiniciar");
+            counting_active_time = 0;
+            counted_active_time_min = 0;
+            counted_active_time_sec = 0;
+            houve_reset = 1;
+            break;
+          }
+          // Depois da pausa (sem reiniciar), voltar a contar
+          lcdClear_sec();
+        }
+      }
+      if ((active_time*60) == counting_active_time){
+        lcdClear_sec();
+        sprintf(buffer, "%dm%ds", counted_active_time_min, counted_active_time_sec);
+        lcdWrite_sec(buffer);
+        // Ligar o buzzer por 1 segundo
+        P1OUT |= BUZZER;
+        __delay_cycles(1000000);
+        P1OUT &= ~(BUZZER);
+        counting_active_time = 0;
+        counted_active_time_min = 0;
+        counted_active_time_sec = 0;
+        P1OUT &= ~(LEDRGB_GREEN);
+      }
+    }
+
+    // Se o usuário escolheu o modo descanso
+    if (operating_mode == 0){
+      lcdClear();
+      lcdWrite("Descanso");
+      P2OUT |= LEDRGB_RED;
+      while((rest_time*60) != counting_rest_time){
+        // Escrever quantos minutos se passaram
+        if (minute_changed){
+          lcdClear_sec();
+          minute_changed = 0;
+        }
+        sprintf(buffer, "%dm%ds", counted_rest_time_min, counted_rest_time_sec);
+        lcdWrite_sec(buffer);
+        if (pause_timer_flag) {
+          lcdClear_sec();
+          sprintf(buffer, "PAUSADO %dm%ds", counted_rest_time_min, counted_rest_time_sec);
+          lcdWrite_sec(buffer); // Escreve "PAUSADO - tempo passado (XmYs)" na segunda linha do LCD
+          // Se está pausado e o usuário não apertou para reiniciar
+          while (pause_timer_flag && !reset_timer_flag);
+          // Se o usuário apertou para reiniciar
+          if (reset_timer_flag) {
+            lcdClear_sec();
+            lcdWrite_sec("Reiniciar");
+            counting_rest_time = 0;
+            counted_rest_time_min = 0;
+            counted_rest_time_sec = 0;
+            houve_reset = 1;
+            break;
+          }
+          // Depois da pausa (sem reiniciar), voltar a contar
+          lcdClear_sec();
+        }
+      }
+      if ((rest_time*60) == counting_rest_time){
+        lcdClear_sec();
+        sprintf(buffer, "%dm%ds", counted_rest_time_min, counted_rest_time_sec);
+        lcdWrite_sec(buffer);
+        // Ligar o buzzer por 1 segundo
+        P1OUT |= BUZZER;
+        __delay_cycles(1000000);
+        P1OUT &= ~(BUZZER);
+        counting_rest_time = 0;
+        counted_rest_time_min = 0;
+        counted_rest_time_sec = 0;
+        P2OUT &= ~(LEDRGB_RED);
+      }
+    }
+    // start_timer_flag = 0;
+    pause_timer_flag = 0;
+    operation_mode_flag = 0;
+    // Apenas muda o modo automaticamente se o usuário não pediu reset
+    if (!reset_timer_flag){
+      if (operating_mode){
+        operating_mode = 0;
+      }
+      else {
+        operating_mode = 1;
+      }
+    }
+    else{
+      reset_timer_flag = 0;
+    }
+
+    /*if (reset_timer_flag){
+      reset_timer_flag = 0;
+    }
+    else{
+      lcdClear();
+      lcdWrite("Escolha o modo");
+    }
+    */
   }
 }
 
@@ -138,16 +324,16 @@ uint8_t i2cSend(uint8_t slaveAddr, uint8_t data) {
     UCB0IFG &= ~(UCTXIFG);
     UCB0I2CSA = slaveAddr;
     UCB0CTL1 |= UCTR|UCTXSTT; // Mestre como transmissor e mandando START
-    while((UCB0IFG & UCTXIFG) == 0); // Enquanto o buffer está cheio
+    while(!(UCB0IFG & UCTXIFG)); // Enquanto o buffer está cheio
     UCB0TXBUF = data;
-    while((UCB0CTL1 & UCTXSTT) == 1);
+    while((UCB0CTL1 & UCTXSTT));
     int answer;
-    if((UCB0IFG & UCNACKIFG) == 0){
-      while((UCB0IFG & UCTXIFG) == 0);
+    if(!(UCB0IFG & UCNACKIFG)){
+      while(!(UCB0IFG & UCTXIFG));
     }
     answer = UCB0IFG & UCNACKIFG;
     UCB0CTL1 |= UCTXSTP;
-    while ((UCB0CTL1 & UCTXSTP) == 1);
+    while ((UCB0CTL1 & UCTXSTP));
     return answer;  
 }
 
@@ -222,6 +408,38 @@ void lcdInit (void){
 }
 
 void lcdWrite(char* str){
+    uint8_t col = 0;
+    lcdWriteByte(0x80, 0);
+     while (*str != '\0') {
+        // Quando chegar na 16ª posição, muda para a segunda linha
+        if (col == 16) {
+            lcdWriteByte(0xC0, 0);
+        }
+
+        // Se já escreveu 32 caracteres (16 + 16), para
+        if (col >= 32) {
+            break;
+        }
+        lcdWriteByte(*str, 1);
+        str++;
+        col++;
+    }
+}
+
+void lcdWrite_sec(char* str){
+  uint8_t col = 0;
+  lcdWriteByte(0xC0, 0); // Começa a escrever na segunda linha
+  while (*str != '\0') {
+    if (col >= 16){
+      break;
+    }
+    lcdWriteByte(*str, 1);
+    str++;
+    col++;
+  }
+}
+
+/* void lcdWrite(char* str){
   uint8_t row = 0;
   uint8_t col = 0;
 
@@ -241,10 +459,21 @@ void lcdWrite(char* str){
   }
     
 }
+*/
 
 void lcdClear(void) {
   lcdWriteByte(0x01, 0);     
   __delay_cycles(20000);         
+}
+
+void lcdClear_sec(void) {
+  int i;
+  lcdWriteByte(0xC0, 0);
+  // Apaga o que estava escrito na segunda linha do LCD
+  for (i = 0; i < 16; i++){
+    lcdWriteByte(' ', 1);
+  }
+  lcdWriteByte(0xC0, 0);
 }
 
 void UART_init(void){
@@ -305,13 +534,71 @@ void UART_receive(void) {
   }
 }
 
-
 // Interrupção realizada a cada 1 segundo
 # pragma vector = TIMER0_A0_VECTOR
 __interrupt void TA0CCR0_ISR(){
+  // O Timer só deve contar se a condição de start estiver ativada
+  if ((!start_timer_flag)){
+    return;
+  }
+
   if (operating_mode){
     counting_active_time += 1;
-  } else{
+    counted_active_time_sec += 1;
+    if (counted_active_time_sec >= 60){
+      minute_changed = 1;
+      counted_active_time_min += 1;
+      counted_active_time_sec = 0;
+    }
+  } 
+  else{
     counting_rest_time += 1;
+    counted_rest_time_sec += 1; 
+    if (counted_rest_time_sec >= 60){
+      minute_changed = 1;
+      counted_rest_time_min += 1;
+      counted_rest_time_sec = 0;
+    }
+  }
+
+}
+
+#pragma vector = PORT1_VECTOR
+__interrupt void PORT1 (){
+  if (P1IFG & BIT3){
+    __delay_cycles(10000);
+    if (!(P1IN & BIT3)){
+      start_timer_flag = 1;
+      pause_timer_flag = 0;
+      reset_timer_flag = 0;
+    }
+    P1IFG &= ~BIT3;
+  }
+  if (P1IFG & BIT5){
+    __delay_cycles(10000);
+    if (!(P1IN & BIT5)){
+      pause_timer_flag = 1;
+      start_timer_flag = 0;
+    }
+    P1IFG &= ~BIT5;
+  }
+}
+
+#pragma vector = PORT2_VECTOR
+__interrupt void PORT2 (){
+  if (P2IFG & BIT0){
+    __delay_cycles(10000);
+    if (!(P2IN & BIT0)){
+      reset_timer_flag = 1;
+      start_timer_flag = 0;
+    }
+    P2IFG &= ~BIT0;
+  }
+  if (P2IFG & BIT6){
+    __delay_cycles(10000);
+    if (!(P2IN & BIT6)){
+      operation_mode_flag = 1;
+    }
+    P2IFG &= ~BIT6;
   }
 }
